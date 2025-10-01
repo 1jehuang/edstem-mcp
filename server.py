@@ -86,16 +86,16 @@ async def list_tools() -> list[Tool]:
                         "description": "Maximum number of threads to return (default: 30)",
                         "default": 30
                     },
+                    "offset": {
+                        "type": "number",
+                        "description": "Offset for pagination (default: 0)",
+                        "default": 0
+                    },
                     "sort": {
                         "type": "string",
                         "description": "Sort order: 'new', 'top', 'trending' (default: 'new')",
                         "enum": ["new", "top", "trending"],
                         "default": "new"
-                    },
-                    "filter": {
-                        "type": "string",
-                        "description": "Filter: 'unresolved', 'unanswered', 'following', 'mine' (optional)",
-                        "enum": ["unresolved", "unanswered", "following", "mine"]
                     }
                 },
                 "required": ["course_id"]
@@ -190,10 +190,6 @@ async def list_tools() -> list[Tool]:
                     "course_id": {
                         "type": "number",
                         "description": "The course ID"
-                    },
-                    "filter": {
-                        "type": "string",
-                        "description": "Filter by role: 'student', 'staff', 'tutor' (optional)"
                     }
                 },
                 "required": ["course_id"]
@@ -232,19 +228,32 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
     try:
         if name == "get_user_info":
             result = client.get_user_info()
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+            # Summarize to avoid token limit - just show user and course list
+            summary = {
+                "user": result.get("user", {}),
+                "courses": [
+                    {
+                        "id": c["course"]["id"],
+                        "code": c["course"].get("code"),
+                        "name": c["course"].get("name"),
+                        "role": c.get("role")
+                    }
+                    for c in result.get("courses", [])
+                ]
+            }
+            return [TextContent(type="text", text=json.dumps(summary, indent=2))]
 
         elif name == "list_threads":
             course_id = arguments["course_id"]
             limit = arguments.get("limit", 30)
+            offset = arguments.get("offset", 0)
             sort = arguments.get("sort", "new")
-            filter_type = arguments.get("filter")
 
             result = client.list_threads(
-                course_id=course_id,
+                course_id,
                 limit=limit,
-                sort=sort,
-                filter=filter_type
+                offset=offset,
+                sort=sort
             )
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
@@ -273,8 +282,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
         elif name == "list_users":
             course_id = arguments["course_id"]
-            filter_type = arguments.get("filter")
-            result = client.list_users(course_id, role=filter_type)
+            result = client.list_users(course_id)
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
         elif name == "search_threads":
