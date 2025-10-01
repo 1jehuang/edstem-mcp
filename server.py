@@ -25,8 +25,11 @@ def init_ed_client():
         if not token:
             raise ValueError("ED_API_TOKEN environment variable not set")
 
-        ed_client = EdAPI(api_token=token)
-        ed_client.login()
+        # EdAPI loads token from environment automatically
+        ed_client = EdAPI()
+        # Token should already be loaded, but verify
+        if ed_client.api_token is None:
+            ed_client.api_token = token
     return ed_client
 
 # Initialize MCP server
