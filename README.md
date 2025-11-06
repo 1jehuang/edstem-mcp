@@ -79,7 +79,12 @@ Get information about authenticated user and enrolled courses.
 
 ### `list_threads`
 List threads in a course with optional filtering.
-- **Parameters**: `course_id`, `limit`, `sort` (new/top/trending), `filter` (unresolved/unanswered/following/mine)
+- **Parameters**:
+  - `course_id` (required): Course ID
+  - `limit` (optional): Maximum threads to return (default: 30)
+  - `offset` (optional): Pagination offset (default: 0)
+  - `sort` (optional): Sort order - 'new', 'top', 'trending' (default: 'new')
+  - `filter` (optional): Filter threads - 'unresolved', 'unanswered', 'mine', 'following'
 
 ### `get_thread`
 Get detailed thread information including all comments.
@@ -99,12 +104,41 @@ Search for threads by keyword.
 
 ### `list_users`
 List users enrolled in a course.
-- **Parameters**: `course_id`, `filter` (student/staff/tutor)
+- **Parameters**: `course_id`
 
 ## Resources
 
 The server exposes:
 - `edstem://user` - Current user information and courses
+
+## Improvements & Features
+
+### Enhanced Search (v1.1)
+- **Content search**: Search now looks in both thread titles AND content (not just titles)
+- **Better results**: More accurate matching for finding relevant discussions
+
+### Thread Filtering
+- **Unresolved**: Show only threads without accepted answers
+- **Unanswered**: Show threads with no responses yet
+- **Mine**: Show only threads you created
+- **Following**: Show threads you're following
+
+### Error Handling
+- **Specific error types**: Authentication errors, API errors, and validation errors are handled separately
+- **Detailed messages**: Clear error messages help diagnose issues
+- **Graceful degradation**: Errors don't crash the server
+
+### Debugging & Logging
+- **Log file**: All operations logged to `/tmp/edstem-mcp.log`
+- **Structured logging**: Timestamps, log levels, and detailed messages
+- **Tool tracking**: Every tool call is logged with its parameters
+- **Error tracing**: Full exception tracebacks for debugging
+
+### Standardized Output
+All tools now return consistent data structures:
+- `list_threads`: Returns `{threads: [...], count: N, limit: M, offset: O}`
+- `list_users`: Returns `{users: [...], count: N}`
+- `search_threads`: Returns `{threads: [...], count: N, query: "..."}`
 
 ## Security Notes
 
