@@ -1,0 +1,397 @@
+#!/usr/bin/env python3
+"""
+ed - A fast CLI for Ed Discussion (EdStem).
+
+Usage:
+    ed courses                          List enrolled courses
+    ed threads <course_id> [options]    List threads in a course
+    ed thread <thread_id>               View a thread with comments
+    ed search <course_id> <query>       Search threads
+    ed user                             Show current user info
+    ed announcements <course_id>        Show announcements
+    ed post <course_id> <title> <body>  Post a new thread
+"""
+
+import os
+import sys
+import json
+import argparse
+import textwrap
+import html
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+
+try:
+    import requests
+except ImportError:
+    print("Missing requests library. Install with: pip install requests", file=sys.stderr)
+    sys.exit(1)
+
+BASE_URL = "https://us.edstem.org/api"
+
+def get_token():
+    token = os.getenv("ED_API_TOKEN")
+    if token:
+        return token
+    env_file = Path(__file__).parent.parent / ".env"
+    if env_file.exists():
+        for line in env_file.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("ED_API_TOKEN="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    print("Error: ED_API_TOKEN not set. Export it or add to ~/edstem-mcp/.env", file=sys.stderr)
+    print("Get a token at: https://edstem.org/us/settings/api-tokens", file=sys.stderr)
+    sys.exit(1)
+
+def api(endpoint, method="GET", data=None):
+    token = get_token()
+    headers = {"Authorization": f"Bearer {token}"}
+    url = f"{BASE_URL}/{endpoint.lstrip('/')}"
+    if method == "GET":
+        r = requests.get(url, headers=headers)
+    elif method == "POST":
+        headers["Content-Type"] = "application/json"
+        r = requests.post(url, headers=headers, json=data)
+    elif method == "PUT":
+        headers["Content-Type"] = "application/json"
+        r = requests.put(url, headers=headers, json=data)
+    else:
+        raise ValueError(f"Unsupported method: {method}")
+
+    if r.status_code == 401:
+        print("Error: Invalid or expired token. Regenerate at https://edstem.org/us/settings/api-tokens", file=sys.stderr)
+        sys.exit(1)
+    r.raise_for_status()
+    return r.json()
+
+def strip_html(text):
+    if not text:
+        return ""
+    text = re.sub(r'<br\s*/?>', '\n', text)
+    text = re.sub(r'<p[^>]*>', '\n', text)
+    text = re.sub(r'</p>', '', text)
+    text = re.sub(r'<pre[^>]*>(.*?)</pre>', r'\n```\n\1\n```\n', text, flags=re.DOTALL)
+    text = re.sub(r'<code[^>]*>(.*?)</code>', r'`\1`', text, flags=re.DOTALL)
+    text = re.sub(r'<strong>(.*?)</strong>', r'**\1**', text, flags=re.DOTALL)
+    text = re.sub(r'<b>(.*?)</b>', r'**\1**', text, flags=re.DOTALL)
+    text = re.sub(r'<em>(.*?)</em>', r'*\1*', text, flags=re.DOTALL)
+    text = re.sub(r'<i>(.*?)</i>', r'*\1*', text, flags=re.DOTALL)
+    text = re.sub(r'<a[^>]+href="([^"]*)"[^>]*>(.*?)</a>', r'\2 (\1)', text, flags=re.DOTALL)
+    text = re.sub(r'<li[^>]*>', '  - ', text)
+    text = re.sub(r'</li>', '\n', text)
+    text = re.sub(r'<[^>]+>', '', text)
+    text = html.unescape(text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+def ago(iso_str):
+    if not iso_str:
+        return "?"
+    try:
+        dt = datetime.fromisoformat(iso_str.replace("+10:00", "+10:00").replace("+11:00", "+11:00"))
+        now = datetime.now(timezone.utc)
+        dt_utc = dt.astimezone(timezone.utc)
+        delta = now - dt_utc
+        secs = int(delta.total_seconds())
+        if secs < 60:
+            return "just now"
+        elif secs < 3600:
+            m = secs // 60
+            return f"{m}m ago"
+        elif secs < 86400:
+            h = secs // 3600
+            return f"{h}h ago"
+        elif secs < 604800:
+            d = secs // 86400
+            return f"{d}d ago"
+        else:
+            w = secs // 604800
+            return f"{w}w ago"
+    except Exception:
+        return iso_str[:10]
+
+# ── Commands ──
+
+def cmd_user(args):
+    data = api("user")
+    courses = data.get("courses", [])
+    user = data.get("user", {})
+    print(f"  {user.get('name', '?')} ({user.get('email', '?')})")
+    print(f"  ID: {user.get('id')}")
+    print()
+
+    active = [c for c in courses if c["course"].get("status") == "active"]
+    archived = [c for c in courses if c["course"].get("status") == "archived"]
+
+    if active:
+        print(f"  Active courses ({len(active)}):")
+        for c in active:
+            co = c["course"]
+            print(f"    {co['id']:>6}  {co.get('code', ''):<30} {co.get('name', '')}")
+    if archived and not args.active_only:
+        print(f"\n  Archived courses ({len(archived)}):")
+        for c in archived:
+            co = c["course"]
+            print(f"    {co['id']:>6}  {co.get('code', ''):<30} {co.get('name', '')}")
+
+def cmd_courses(args):
+    data = api("user")
+    courses = data.get("courses", [])
+
+    if not args.all:
+        courses = [c for c in courses if c["course"].get("status") == "active"]
+
+    if args.json:
+        out = [{"id": c["course"]["id"], "code": c["course"].get("code"), "name": c["course"].get("name"), "status": c["course"].get("status")} for c in courses]
+        print(json.dumps(out, indent=2))
+        return
+
+    for c in courses:
+        co = c["course"]
+        status = "📦" if co.get("status") == "archived" else "📗"
+        print(f"  {status} {co['id']:>6}  {co.get('code', ''):<30} {co.get('name', '')}")
+
+def cmd_threads(args):
+    params = f"limit={args.limit}&sort={args.sort}"
+    if args.offset:
+        params += f"&offset={args.offset}"
+    data = api(f"courses/{args.course_id}/threads?{params}")
+    threads = data.get("threads", [])
+
+    if args.category:
+        cat = args.category.lower()
+        threads = [t for t in threads if cat in (t.get("category") or "").lower()]
+
+    if args.unanswered:
+        threads = [t for t in threads if not t.get("is_answered")]
+
+    if args.json:
+        print(json.dumps(threads, indent=2))
+        return
+
+    for t in threads:
+        kind = t.get("type", "?")
+        num = t.get("number", "")
+        title = t.get("title", "")
+        cat = t.get("category", "")
+        answered = "✅" if t.get("is_answered") else "  "
+        time = ago(t.get("created_at"))
+        replies = t.get("reply_count", 0)
+
+        icon = {"announcement": "📢", "question": "❓", "post": "💬"}.get(kind, "📝")
+        print(f"  {icon} #{num:<4} {answered} {title}")
+        print(f"         [{cat}] {replies} replies, {time}")
+
+def cmd_thread(args):
+    data = api(f"threads/{args.thread_id}")
+    thread = data.get("thread", data)
+
+    if args.json:
+        print(json.dumps(thread, indent=2))
+        return
+
+    title = thread.get("title", "")
+    user = thread.get("user", {})
+    username = user.get("name", "Anonymous")
+    created = ago(thread.get("created_at"))
+    kind = thread.get("type", "")
+    cat = thread.get("category", "")
+    num = thread.get("number", "")
+    content = strip_html(thread.get("content", ""))
+
+    print(f"\n  #{num} [{kind}] {title}")
+    print(f"  by {username} in [{cat}] - {created}")
+    print(f"  {'─' * 60}")
+    for line in content.split('\n'):
+        print(f"  {line}")
+    print(f"  {'─' * 60}")
+
+    answers = thread.get("answers", [])
+    comments = thread.get("comments", [])
+
+    if answers:
+        print(f"\n  ✅ Accepted Answer(s):")
+        for a in answers:
+            a_user = a.get("user", {})
+            a_name = a_user.get("name", "Anonymous") if a_user else "Anonymous"
+            a_content = strip_html(a.get("content", ""))
+            a_time = ago(a.get("created_at"))
+            print(f"\n  [{a_name}] ({a_time})")
+            for line in a_content.split('\n'):
+                print(f"    {line}")
+
+    if comments:
+        print(f"\n  💬 Comments ({len(comments)}):")
+        for c in comments:
+            c_user = c.get("user", {})
+            c_name = c_user.get("name", "Anonymous") if c_user else "Anonymous"
+            c_content = strip_html(c.get("content", ""))
+            c_time = ago(c.get("created_at"))
+            is_answer = " ✅" if c.get("is_answer") else ""
+            print(f"\n  [{c_name}]{is_answer} ({c_time})")
+            for line in c_content.split('\n'):
+                print(f"    {line}")
+
+            sub_comments = c.get("comments", [])
+            if sub_comments:
+                for sc in sub_comments:
+                    sc_user = sc.get("user", {})
+                    sc_name = sc_user.get("name", "Anonymous") if sc_user else "Anonymous"
+                    sc_content = strip_html(sc.get("content", ""))
+                    sc_time = ago(sc.get("created_at"))
+                    print(f"\n      [{sc_name}] ({sc_time})")
+                    for line in sc_content.split('\n'):
+                        print(f"        {line}")
+
+def cmd_search(args):
+    data = api(f"courses/{args.course_id}/threads?limit=100&sort=new")
+    threads = data.get("threads", [])
+
+    query = args.query.lower()
+    matching = []
+    for t in threads:
+        title = (t.get("title") or "").lower()
+        content = (t.get("content") or "").lower()
+        if query in title or query in content:
+            matching.append(t)
+            if len(matching) >= args.limit:
+                break
+
+    if args.json:
+        print(json.dumps(matching, indent=2))
+        return
+
+    if not matching:
+        print(f"  No threads matching '{args.query}'")
+        return
+
+    print(f"  Found {len(matching)} threads matching '{args.query}':\n")
+    for t in matching:
+        num = t.get("number", "")
+        title = t.get("title", "")
+        cat = t.get("category", "")
+        time = ago(t.get("created_at"))
+        print(f"  #{num:<4} {title}")
+        print(f"         [{cat}] {time}")
+
+def cmd_announcements(args):
+    data = api(f"courses/{args.course_id}/threads?limit=50&sort=new")
+    threads = data.get("threads", [])
+    announcements = [t for t in threads if t.get("type") == "announcement"]
+
+    if args.json:
+        print(json.dumps(announcements, indent=2))
+        return
+
+    if not announcements:
+        print("  No announcements found.")
+        return
+
+    for a in announcements[:args.limit]:
+        num = a.get("number", "")
+        title = a.get("title", "")
+        time = ago(a.get("created_at"))
+        content = strip_html(a.get("content", ""))
+        if len(content) > 200:
+            content = content[:200] + "..."
+        print(f"  📢 #{num} {title} ({time})")
+        if content:
+            print(f"     {content[:120]}")
+        print()
+
+def cmd_post(args):
+    payload = {
+        "thread": {
+            "type": args.type,
+            "title": args.title,
+            "category": args.category or "",
+            "subcategory": "",
+            "content": f"<document><paragraph>{args.body}</paragraph></document>",
+            "is_pinned": False,
+            "is_private": args.private,
+            "is_anonymous": args.anonymous,
+            "is_megathread": False,
+            "anonymous_comments": False,
+        }
+    }
+    data = api(f"courses/{args.course_id}/threads", method="POST", data=payload)
+    thread = data.get("thread", data)
+    tid = thread.get("id", "?")
+    num = thread.get("number", "?")
+    print(f"  ✅ Thread created: #{num} (id: {tid})")
+
+# ── Main ──
+
+def main():
+    parser = argparse.ArgumentParser(prog="ed", description="CLI for Ed Discussion (EdStem)")
+    parser.add_argument("--json", action="store_true", help="Output raw JSON")
+    sub = parser.add_subparsers(dest="command")
+
+    # user
+    p_user = sub.add_parser("user", help="Show user info and courses")
+    p_user.add_argument("--active-only", action="store_true", help="Only show active courses")
+
+    # courses
+    p_courses = sub.add_parser("courses", help="List enrolled courses")
+    p_courses.add_argument("--all", "-a", action="store_true", help="Include archived courses")
+
+    # threads
+    p_threads = sub.add_parser("threads", help="List threads in a course")
+    p_threads.add_argument("course_id", type=int)
+    p_threads.add_argument("--limit", "-n", type=int, default=20)
+    p_threads.add_argument("--offset", type=int, default=0)
+    p_threads.add_argument("--sort", choices=["new", "top", "trending"], default="new")
+    p_threads.add_argument("--category", "-c", help="Filter by category")
+    p_threads.add_argument("--unanswered", "-u", action="store_true", help="Only unanswered")
+
+    # thread
+    p_thread = sub.add_parser("thread", help="View a thread with comments")
+    p_thread.add_argument("thread_id", type=int)
+
+    # search
+    p_search = sub.add_parser("search", help="Search threads in a course")
+    p_search.add_argument("course_id", type=int)
+    p_search.add_argument("query")
+    p_search.add_argument("--limit", "-n", type=int, default=20)
+
+    # announcements
+    p_ann = sub.add_parser("announcements", aliases=["ann"], help="Show announcements")
+    p_ann.add_argument("course_id", type=int)
+    p_ann.add_argument("--limit", "-n", type=int, default=10)
+
+    # post
+    p_post = sub.add_parser("post", help="Post a new thread")
+    p_post.add_argument("course_id", type=int)
+    p_post.add_argument("title")
+    p_post.add_argument("body")
+    p_post.add_argument("--category", "-c", default="")
+    p_post.add_argument("--type", choices=["post", "question"], default="question")
+    p_post.add_argument("--private", action="store_true")
+    p_post.add_argument("--anonymous", action="store_true")
+
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        sys.exit(1)
+
+    cmd_map = {
+        "user": cmd_user,
+        "courses": cmd_courses,
+        "threads": cmd_threads,
+        "thread": cmd_thread,
+        "search": cmd_search,
+        "announcements": cmd_announcements,
+        "ann": cmd_announcements,
+        "post": cmd_post,
+    }
+
+    func = cmd_map.get(args.command)
+    if func:
+        func(args)
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()
